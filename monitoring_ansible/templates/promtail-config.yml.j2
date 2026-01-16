@@ -1,11 +1,14 @@
 server:
-  http_listen_port: 9080
+  # Promtail 자체의 상태 확인용 포트
+  http_listen_port: {{ promtail_port | default(9080) }}
 
 positions:
-  filename: /tmp/positions.yaml
+  # 로그 읽은 위치를 기록하는 파일 (중복 수집 방지)
+  filename: {{ promtail_positions_path | default('/tmp/positions.yaml') }}
 
 clients:
-  - url: http://{{ monitoring_server_ip }}:3100/loki/api/v1/push
+  # 로그를 전송할 Loki 서버 주소 (monitoring_server_ip 활용)
+  - url: http://{{ monitoring_server_ip }}:{{ loki_port | default(3100) }}/loki/api/v1/push
 
 scrape_configs:
   # 1. 시스템 로그 파일 수집
@@ -15,7 +18,7 @@ scrape_configs:
       labels:
         job: system_logs
         host: {{ inventory_hostname }}
-        __path__: /var/log/messages
+        __path__: {{ system_log_path | default('/var/log/messages') }}
 
   # 2. Nginx 웹 로그 수집
   - job_name: nginx_logs
@@ -24,12 +27,12 @@ scrape_configs:
       labels:
         job: nginx_logs
         host: {{ inventory_hostname }}
-        __path__: /var/log/nginx/*.log
+        __path__: {{ nginx_log_path | default('/var/log/nginx/*.log') }}
 
-  # 3. Journalctl (systemd) 로그 수집 - 추가된 부분
+  # 3. Journalctl (systemd) 로그 수집
   - job_name: journal
     journal:
-      max_age: 12h
+      max_age: {{ journal_max_age | default('12h') }}
       labels:
         job: systemd_journal
         host: {{ inventory_hostname }}

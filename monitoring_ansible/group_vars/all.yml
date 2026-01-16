@@ -1,0 +1,21 @@
+# --- 모니터링 공통 설정 ---
+monitoring_server_ip: "10.4.5.10"
+load_balancer_external_ip: "172.16.6.82"
+
+# --- 포트 설정 ---
+prometheus_port: 9090
+loki_port: 3100
+promtail_port: 9080
+blackbox_exporter_port: 9115
+node_exporter_port: 9100
+
+# --- 서비스 실행 계정 ---
+prometheus_user: "prometheus"
+loki_user: "ansible-admin"
+promtail_user: "root"
+node_exporter_user: "ansible-admin"
+
+# --- 경로 및 보관 설정 ---
+prometheus_db_path: "/var/lib/prometheus/"
+prometheus_retention_time: "15d"
+journal_max_age: "12h"
