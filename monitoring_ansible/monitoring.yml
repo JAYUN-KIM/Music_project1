@@ -1,5 +1,5 @@
 ---
-- name: Setup Full Monitoring Stack with Hybrid Firewall & NAS Permission
+- name: Setup Full Monitoring Stack with Multi-Tenancy & NAS Automation
   hosts: all
   become: yes
 
@@ -16,7 +16,7 @@
     minio_data_path: "/mnt/NAS/minio_data"
     minio_root_user: "minioadmin"
     minio_root_password: "minioadmin"
-    monitoring_server_ip: "172.16.6.85" 
+    monitoring_server_ip: "10.4.5.10" 
 
   tasks:
     #####################################################################
@@ -58,10 +58,10 @@
         - { src: "/tmp/promtail-linux-amd64", dest: "promtail" }
 
     #####################################################################
-    # [섹션 2] 모니터링 서버 전용 스택 (10.4.5.10 전용)
+    # [섹션 2] 모니터링 서버 전용 스택 (monitoring_server 그룹 전용)
     #####################################################################
     - name: 모니터링 메인 서버 블록
-      when: inventory_hostname == '10.4.5.10'
+      when: "'monitoring_server' in group_names"
       block:
         - name: Grafana RPM 설치
           dnf:
@@ -69,7 +69,7 @@
             state: present
             disable_gpg_check: yes
 
-        - name: 일반 시스템 디렉터리 생성 (Root 권한)
+        - name: 시스템 디렉터리 생성
           file:
             path: "{{ item.path }}"
             state: directory
@@ -80,25 +80,22 @@
             - { path: /var/lib/prometheus, owner: "{{ prometheus_user }}" }
             - { path: /etc/grafana/provisioning/datasources }
 
-        - name: NAS 데이터 디렉터리 생성 (권한 보강)
+        - name: NAS 데이터 디렉터리 생성 (충돌 방지 처리)
           file:
             path: "{{ minio_data_path }}"
             state: directory
             owner: "{{ admin_user }}"
             group: "{{ admin_user }}"
             mode: '0775'
-            recurse: yes
-          become: yes  # root 권한으로 생성하되 소유권을 ansible-admin으로 설정
+          become: no
 
-        - name: 메인 스택 바이너리 다운로드 및 배치
+        - name: 메인 서버 바이너리 다운로드
           get_url:
-            url: "{{ item.url }}"
-            dest: "/usr/local/bin/{{ item.dest }}"
+            url: "https://dl.min.io/server/minio/release/linux-amd64/minio"
+            dest: "/usr/local/bin/minio"
             mode: '0755'
-          loop:
-            - { url: "https://dl.min.io/server/minio/release/linux-amd64/minio", dest: "minio" }
 
-        - name: 나머지 압축 파일들 처리
+        - name: 메인 스택 압축 해제
           unarchive:
             src: "{{ item.url }}"
             dest: /tmp
@@ -138,22 +135,15 @@
         - { src: loki-config.yml.j2, dest: /etc/loki-config.yaml }
         - { src: blackbox_exporter.service.j2, dest: /etc/systemd/system/blackbox_exporter.service }
         - { src: minio.service.j2, dest: /etc/systemd/system/minio.service }
-      when: inventory_hostname == '10.4.5.10'
+        - { src: loki-datasource.yml.j2, dest: /etc/grafana/provisioning/datasources/loki.yaml }
+      when: "'monitoring_server' in group_names"
 
     #####################################################################
-    # [섹션 4] 서비스 기동 및 MinIO 버킷 자동화
+    # [섹션 4] 서비스 가동 및 초기화 (실행 범위 수정 완료)
     #####################################################################
     - name: systemd 데몬 리로드
       systemd:
         daemon_reload: yes
-
-    - name: Reset failed services (실패 기록 초기화)
-      command: "systemctl reset-failed {{ item.name }}"
-      ignore_errors: yes
-      loop:
-        - { name: loki, server_only: true }
-        - { name: promtail, server_only: false }
-      when: (not item.server_only) or (inventory_hostname == '10.4.5.10')
 
     - name: 모든 서비스 시작 및 활성화
       systemd:
@@ -168,13 +158,15 @@
         - { name: prometheus, server_only: true }
         - { name: grafana-server, server_only: true }
         - { name: blackbox_exporter, server_only: true }
-      when: (not item.server_only) or (inventory_hostname == '10.4.5.10')
+      when: >
+        (not item.server_only) or 
+        ('monitoring_server' in group_names)
 
-    - name: MinIO 버킷 자동 생성 (loki-data)
+    - name: MinIO 버킷 자동 생성
       shell: |
         curl -s https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
         chmod +x /usr/local/bin/mc
         /usr/local/bin/mc alias set myminio http://127.0.0.1:9000 {{ minio_root_user }} {{ minio_root_password }}
         /usr/local/bin/mc mb myminio/loki-data --ignore-existing
-      when: inventory_hostname == '10.4.5.10'
+      when: "'monitoring_server' in group_names"
       ignore_errors: yes

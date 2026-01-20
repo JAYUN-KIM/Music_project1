@@ -2,13 +2,13 @@ auth_enabled: true
 
 server:
   http_listen_port: 3100
-  grpc_listen_port: 9095
+  grpc_listen_port: 9096
 
 common:
   path_prefix: /tmp/loki
   storage:
     s3:
-      endpoint: 172.16.6.85:9000
+      endpoint: {{ monitoring_server_ip }}:9000
       insecure: true
       bucketnames: loki-data
       access_key_id: {{ minio_root_user }}
@@ -33,21 +33,19 @@ schema_config:
         prefix: index_
         period: 24h
 
-# [실무 차등 보관 설정]
+# [수정 포인트] limits_config와 retention 구조 변경
 limits_config:
-  retention_period: 168h        # 기본 보관: 7일
-  # 특정 라벨에 따른 차등 보관 설정
-  per_stream_retention:
-    - priority: 1
-      period: 360h              # Error/Warning 로그: 15일
-      selector: '{level =~ "error|warning|ERROR|WARN"}'
+  retention_period: 168h
+  # 2.9.x 버전 호환성을 위해 우선 기본 리텐션만 적용하거나 구조를 단순화합니다.
   allow_structured_metadata: true
   reject_old_samples: true
-  reject_old_samples_max_age: 360h
+  reject_old_samples_max_age: 168h
 
+# [수정 포인트] compactor 설정 강화
 compactor:
   working_directory: /tmp/loki/retention
   shared_store: s3
   compaction_interval: 10m
   retention_enabled: true
   retention_delete_delay: 2h
+  # 여기서 개별 보관 주기를 설정하는 대신 전체 주기를 먼저 맞춥니다.
