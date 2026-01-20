@@ -1,41 +1,48 @@
 server:
-  # Promtail 자체의 상태 확인용 포트
-  http_listen_port: {{ promtail_port | default(9080) }}
+  http_listen_port: 9080
 
 positions:
-  # 로그 읽은 위치를 기록하는 파일 (중복 수집 방지)
-  filename: {{ promtail_positions_path | default('/tmp/positions.yaml') }}
+  filename: /tmp/positions.yaml
 
 clients:
-  # 로그를 전송할 Loki 서버 주소 (monitoring_server_ip 활용)
-  - url: http://{{ monitoring_server_ip }}:{{ loki_port | default(3100) }}/loki/api/v1/push
+  - url: http://{{ monitoring_server_ip }}:3100/loki/api/v1/push
+    tenant_id: "monitoring"
 
 scrape_configs:
-  # 1. 시스템 로그 파일 수집
-  - job_name: system_files
+  - job_name: system_logs
     static_configs:
     - targets: [localhost]
       labels:
         job: system_logs
         host: {{ inventory_hostname }}
-        __path__: {{ system_log_path | default('/var/log/messages') }}
+        server_group: "{{ group_names[0] if group_names else 'standalone' }}"
+        __path__: /var/log/messages
+    
+    pipeline_stages:
+      # 1. 로그 내용에서 중요 키워드 감지 (대소문자 무시)
+      - regex:
+          expression: "(?i)(?P<error_keyword>error|warn|fail|critical|exception|fatal)"
+      
+      # 2. 키워드가 발견되면 level 라벨을 'error'로 설정 (Loki의 15일 보관 정책과 연결)
+      - labels:
+          level: error_keyword
 
-  # 2. Nginx 웹 로그 수집
-  - job_name: nginx_logs
+      # 3. 너무 단순한 INFO 세션 로그 등은 제거 (용량 최적화)
+      - drop:
+          expression: ".*session opened for user root.*"
+
+  - job_name: secure_logs
     static_configs:
     - targets: [localhost]
       labels:
-        job: nginx_logs
+        job: auth_logs
         host: {{ inventory_hostname }}
-        __path__: {{ nginx_log_path | default('/var/log/nginx/*.log') }}
-
-  # 3. Journalctl (systemd) 로그 수집
-  - job_name: journal
-    journal:
-      max_age: {{ journal_max_age | default('12h') }}
-      labels:
-        job: systemd_journal
-        host: {{ inventory_hostname }}
-    relabel_configs:
-      - source_labels: ['__journal__systemd_unit']
-        target_label: 'unit'
+        server_group: "{{ group_names[0] if group_names else 'standalone' }}"
+        __path__: /var/log/secure
+    pipeline_stages:
+      # 보안 로그 중 'Failed password' (로그인 실패)는 매우 중요하므로 에러 레벨 부여
+      - match:
+          selector: '{job="auth_logs"} |= "Failed"'
+          stages:
+            - static_labels:
+                level: error

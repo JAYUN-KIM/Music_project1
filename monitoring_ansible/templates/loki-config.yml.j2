@@ -1,0 +1,53 @@
+auth_enabled: true
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+
+common:
+  path_prefix: /tmp/loki
+  storage:
+    s3:
+      endpoint: 172.16.6.85:9000
+      insecure: true
+      bucketnames: loki-data
+      access_key_id: {{ minio_root_user }}
+      secret_access_key: {{ minio_root_password }}
+      s3forcepathstyle: true
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+
+memberlist:
+  join_members: ["127.0.0.1"]
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# [실무 차등 보관 설정]
+limits_config:
+  retention_period: 168h        # 기본 보관: 7일
+  # 특정 라벨에 따른 차등 보관 설정
+  per_stream_retention:
+    - priority: 1
+      period: 360h              # Error/Warning 로그: 15일
+      selector: '{level =~ "error|warning|ERROR|WARN"}'
+  allow_structured_metadata: true
+  reject_old_samples: true
+  reject_old_samples_max_age: 360h
+
+compactor:
+  working_directory: /tmp/loki/retention
+  shared_store: s3
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h

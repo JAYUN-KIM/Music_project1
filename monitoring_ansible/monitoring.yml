@@ -1,11 +1,9 @@
 ---
-- name: Setup Full Monitoring Stack (Server & Agents)
+- name: Setup Full Monitoring Stack with Hybrid Firewall & NAS Permission
   hosts: all
   become: yes
 
-  # 1. 변수 설정 (중앙 집중 관리)
   vars:
-    # 버전 정보
     node_exporter_ver: "1.7.0"
     promtail_ver: "2.9.2"
     prometheus_ver: "2.48.0"
@@ -13,13 +11,12 @@
     grafana_ver: "10.2.2"
     blackbox_exporter_ver: "0.24.0"
 
-    # 실행 환경 설정 (j2 템플릿에서 사용된 변수들)
     admin_user: "ansible-admin"
     prometheus_user: "prometheus"
-    prometheus_port: 9090
-    loki_port: 3100
-    blackbox_exporter_port: 9115
-    promtail_port: 9080
+    minio_data_path: "/mnt/NAS/minio_data"
+    minio_root_user: "minioadmin"
+    minio_root_password: "minioadmin"
+    monitoring_server_ip: "172.16.6.85" 
 
   tasks:
     #####################################################################
@@ -37,7 +34,7 @@
         state: present
 
     #####################################################################
-    # [섹션 1] 에이전트 설치 (모든 호스트: Node Exporter, Promtail)
+    # [섹션 1] 에이전트 설치 (모든 호스트)
     #####################################################################
     - name: 에이전트 바이너리 다운로드 및 압축 해제
       unarchive:
@@ -61,10 +58,10 @@
         - { src: "/tmp/promtail-linux-amd64", dest: "promtail" }
 
     #####################################################################
-    # [섹션 2] 모니터링 서버 전용 스택 (Prometheus, Loki, Grafana, Blackbox)
+    # [섹션 2] 모니터링 서버 전용 스택 (10.4.5.10 전용)
     #####################################################################
-    - name: 모니터링 메인 서버 설정 블록
-      when: inventory_hostname in groups.get('monitoring_server', [])
+    - name: 모니터링 메인 서버 블록
+      when: inventory_hostname == '10.4.5.10'
       block:
         - name: Grafana RPM 설치
           dnf:
@@ -72,48 +69,56 @@
             state: present
             disable_gpg_check: yes
 
-        - name: 모니터링 디렉터리 생성
+        - name: 일반 시스템 디렉터리 생성 (Root 권한)
           file:
             path: "{{ item.path }}"
             state: directory
             owner: "{{ item.owner | default('root') }}"
-            group: "{{ item.group | default('root') }}"
             mode: '0755'
           loop:
             - { path: /etc/prometheus }
-            - { path: /var/lib/prometheus, owner: "{{ prometheus_user }}", group: "{{ prometheus_user }}" }
+            - { path: /var/lib/prometheus, owner: "{{ prometheus_user }}" }
             - { path: /etc/grafana/provisioning/datasources }
 
-        - name: 메인 스택 바이너리 다운로드 및 압축 해제
-          unarchive:
-            src: "https://github.com/{{ item.url }}"
-            dest: "/tmp"
-            remote_src: yes
-          loop:
-            - { url: "prometheus/prometheus/releases/download/v{{ prometheus_ver }}/prometheus-{{ prometheus_ver }}.linux-amd64.tar.gz" }
-            - { url: "grafana/loki/releases/download/v{{ loki_ver }}/loki-linux-amd64.zip" }
-            - { url: "prometheus/blackbox_exporter/releases/download/v{{ blackbox_exporter_ver }}/blackbox_exporter-{{ blackbox_exporter_ver }}.linux-amd64.tar.gz" }
+        - name: NAS 데이터 디렉터리 생성 (권한 보강)
+          file:
+            path: "{{ minio_data_path }}"
+            state: directory
+            owner: "{{ admin_user }}"
+            group: "{{ admin_user }}"
+            mode: '0775'
+            recurse: yes
+          become: yes  # root 권한으로 생성하되 소유권을 ansible-admin으로 설정
 
-        - name: 메인 스택 바이너리 배치
-          copy:
-            src: "{{ item.src }}"
+        - name: 메인 스택 바이너리 다운로드 및 배치
+          get_url:
+            url: "{{ item.url }}"
             dest: "/usr/local/bin/{{ item.dest }}"
             mode: '0755'
+          loop:
+            - { url: "https://dl.min.io/server/minio/release/linux-amd64/minio", dest: "minio" }
+
+        - name: 나머지 압축 파일들 처리
+          unarchive:
+            src: "{{ item.url }}"
+            dest: /tmp
             remote_src: yes
           loop:
-            - { src: "/tmp/loki-linux-amd64", dest: "loki" }
-            - { src: "/tmp/prometheus-{{ prometheus_ver }}.linux-amd64/prometheus", dest: "prometheus" }
-            - { src: "/tmp/blackbox_exporter-{{ blackbox_exporter_ver }}.linux-amd64/blackbox_exporter", dest: "blackbox_exporter" }
+            - { url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_ver }}/prometheus-{{ prometheus_ver }}.linux-amd64.tar.gz" }
+            - { url: "https://github.com/grafana/loki/releases/download/v{{ loki_ver }}/loki-linux-amd64.zip" }
+            - { url: "https://github.com/prometheus/blackbox_exporter/releases/download/v{{ blackbox_exporter_ver }}/blackbox_exporter-{{ blackbox_exporter_ver }}.linux-amd64.tar.gz" }
 
-        - name: Loki 기본 설정 파일 다운로드 (초기값)
-          get_url:
-            url: "https://raw.githubusercontent.com/grafana/loki/v{{ loki_ver }}/cmd/loki/loki-local-config.yaml"
-            dest: /etc/loki-config.yaml
+        - name: 바이너리 이동
+          shell: |
+            cp /tmp/prometheus-{{ prometheus_ver }}.linux-amd64/prometheus /usr/local/bin/
+            cp /tmp/loki-linux-amd64 /usr/local/bin/loki
+            cp /tmp/blackbox_exporter-{{ blackbox_exporter_ver }}.linux-amd64/blackbox_exporter /usr/local/bin/
+            chmod +x /usr/local/bin/{prometheus,loki,blackbox_exporter}
 
     #####################################################################
-    # [섹션 3] 설정 파일 배포 (우리가 수정한 j2 템플릿 적용)
+    # [섹션 3] 설정 파일 배포
     #####################################################################
-    - name: 공통 에이전트 설정 배포 (모든 서버)
+    - name: 모든 서버 공통 설정 배포
       template:
         src: "templates/{{ item.src }}"
         dest: "{{ item.dest }}"
@@ -130,39 +135,46 @@
         - { src: prometheus.service.j2, dest: /etc/systemd/system/prometheus.service }
         - { src: prometheus.yml.j2, dest: /etc/prometheus/prometheus.yml }
         - { src: loki.service.j2, dest: /etc/systemd/system/loki.service }
+        - { src: loki-config.yml.j2, dest: /etc/loki-config.yaml }
         - { src: blackbox_exporter.service.j2, dest: /etc/systemd/system/blackbox_exporter.service }
-      when: inventory_hostname in groups.get('monitoring_server', [])
+        - { src: minio.service.j2, dest: /etc/systemd/system/minio.service }
+      when: inventory_hostname == '10.4.5.10'
 
     #####################################################################
-    # [섹션 4] 실행 및 방화벽
+    # [섹션 4] 서비스 기동 및 MinIO 버킷 자동화
     #####################################################################
-    - name: 방화벽 포트 개방
-      firewalld:
-        port: "{{ item }}/tcp"
-        permanent: yes
-        state: enabled
-      loop: [9090, 3000, 3100, 9100, 9080, 9115]
-      notify: Reload Firewall
+    - name: systemd 데몬 리로드
+      systemd:
+        daemon_reload: yes
+
+    - name: Reset failed services (실패 기록 초기화)
+      command: "systemctl reset-failed {{ item.name }}"
+      ignore_errors: yes
+      loop:
+        - { name: loki, server_only: true }
+        - { name: promtail, server_only: false }
+      when: (not item.server_only) or (inventory_hostname == '10.4.5.10')
 
     - name: 모든 서비스 시작 및 활성화
       systemd:
         name: "{{ item.name }}"
         state: restarted
         enabled: yes
-        daemon_reload: yes
       loop:
         - { name: node_exporter, server_only: false }
         - { name: promtail, server_only: false }
-        - { name: prometheus, server_only: true }
+        - { name: minio, server_only: true }
         - { name: loki, server_only: true }
+        - { name: prometheus, server_only: true }
         - { name: grafana-server, server_only: true }
         - { name: blackbox_exporter, server_only: true }
-      when: >
-        (not item.server_only) or 
-        (inventory_hostname in groups.get('monitoring_server', []))
+      when: (not item.server_only) or (inventory_hostname == '10.4.5.10')
 
-  handlers:
-    - name: Reload Firewall
-      service:
-        name: firewalld
-        state: reloaded
+    - name: MinIO 버킷 자동 생성 (loki-data)
+      shell: |
+        curl -s https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+        chmod +x /usr/local/bin/mc
+        /usr/local/bin/mc alias set myminio http://127.0.0.1:9000 {{ minio_root_user }} {{ minio_root_password }}
+        /usr/local/bin/mc mb myminio/loki-data --ignore-existing
+      when: inventory_hostname == '10.4.5.10'
+      ignore_errors: yes
